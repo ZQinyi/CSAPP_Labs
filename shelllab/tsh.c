@@ -165,6 +165,50 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
+    char *argv[MAXARGS];
+    char buf[MAXLINE];
+    int bg;
+    pid_t pid;
+    sigset_t mask_one, prev;
+
+    strcpy(buf, cmdline);
+    bg = parseline(buf, argv);
+    if (argv[0] == NULL) return;
+
+    // It is not a built_in command
+    if (!builtin_cmd(argv)) {
+        sigemptyset(&mask_one);
+        sigaddset(&mask_one, SIGCHLD);
+        sigprocmask(SIG_BLOCK, &mask_one, &prev); // block the signal before fork
+
+        if((pid = fork()) < 0){
+            unix_error("forking error");
+        } else if (pid == 0) {
+            sigprocmask(SIG_SETMASK, &prev, NULL); // unblock before execve
+            if (setpgid(0, 0) < 0) {
+                perror("SETPGID ERROR");
+                exit(0);
+            };
+
+            if (execve(argv[0], argv, environ) < 0) {
+                printf("%s: Command can not find.\n", argv[0]);
+                exit(0);
+            }
+        } else {
+            if (!bg) {
+                addjob(jobs, pid, FG, cmdline);
+            } else {
+                addjob(jobs, pid, BG, cmdline);
+            }
+            sigprocmask(SIG_SETMASK, &prev, NULL);
+        }
+    
+        if (!bg) {
+            waitfg(pid);
+        } else {
+            printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
+        }
+    }
     return;
 }
 
@@ -186,33 +230,32 @@ int parseline(const char *cmdline, char **argv)
     strcpy(buf, cmdline);
     buf[strlen(buf)-1] = ' ';  /* replace trailing '\n' with space */
     while (*buf && (*buf == ' ')) /* ignore leading spaces */
-	buf++;
+	    buf++;
 
     /* Build the argv list */
     argc = 0;
     if (*buf == '\'') {
-	buf++;
-	delim = strchr(buf, '\'');
-    }
-    else {
-	delim = strchr(buf, ' ');
+	    buf++;
+	    delim = strchr(buf, '\'');
+    } else {
+	    delim = strchr(buf, ' ');
     }
 
     while (delim) {
-	argv[argc++] = buf;
-	*delim = '\0';
-	buf = delim + 1;
-	while (*buf && (*buf == ' ')) /* ignore spaces */
+	    argv[argc++] = buf;
+	    *delim = '\0';
+	    buf = delim + 1;
+	    while (*buf && (*buf == ' ')) /* ignore spaces */
 	       buf++;
 
-	if (*buf == '\'') {
-	    buf++;
-	    delim = strchr(buf, '\'');
-	}
-	else {
-	    delim = strchr(buf, ' ');
-	}
+	    if (*buf == '\'') {
+	        buf++;
+	        delim = strchr(buf, '\'');
+	    } else {
+	        delim = strchr(buf, ' ');
+	    }
     }
+
     argv[argc] = NULL;
     
     if (argc == 0)  /* ignore blank line */
@@ -220,7 +263,7 @@ int parseline(const char *cmdline, char **argv)
 
     /* should the job run in the background? */
     if ((bg = (*argv[argc-1] == '&')) != 0) {
-	argv[--argc] = NULL;
+	    argv[--argc] = NULL;
     }
     return bg;
 }
@@ -231,6 +274,18 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
+    if (!strcmp(argv[0], "quit")) {
+        exit(0);
+    } else if (!strcmp(argv[0], "bg") || !
+        strcmp(argv[0], "fg")) {
+        do_bgfg(argv);
+        return 1;
+    } else if (!strcmp(argv[0], "jobs")) {
+        listjobs(jobs);
+        return 1;
+    } else if (!strcmp(argv[0], "&")) {
+        return 1;
+    }
     return 0;     /* not a builtin command */
 }
 
@@ -239,6 +294,40 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {
+    if (argv[1] == NULL) {
+        printf("%s command requires PID or %%jobid argument\n", argv[0]);
+        return;
+    }
+
+    int id;
+    struct job_t* job;
+    // jid
+    if (sscanf(argv[1], "%%%d", &id) > 0) {
+        job = getjobjid(jobs, id);
+        if (job == NULL) {
+            printf("%%%d: No such job\n", id);
+            return;
+        }
+    } else if (sscanf(argv[1], "%d", &id) > 0) {
+        job = getjobpid(jobs, id);
+        if (job == NULL) {
+            printf("%%%d: No such process\n", id);
+            return;
+        }
+    } else {
+        printf("%s: argument must be a PID or %%JID\n", argv[0]);
+        return;
+    }
+
+    if (!strcmp(argv[0], "bg")) {
+        kill(-(job->pid), SIGCONT);
+        job->state = BG;
+        printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+    } else if (!strcmp(argv[0], "fg")) {
+        kill(-(job->pid), SIGCONT);
+        job->state = FG;
+        waitfg(job->pid);
+    }
     return;
 }
 
@@ -247,6 +336,9 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+    while (pid == fgpid(jobs)) {
+        sleep(1);  
+    }
     return;
 }
 
@@ -263,6 +355,32 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
+    int olderrono = errno;
+    sigset_t mask_all, prev;
+    pid_t pid;
+    int status;
+    
+    sigfillset(&mask_all);
+    while ((pid = waitpid(-1, &status, WNOHANG | WUNTRACED)) > 0) {
+        if (WIFEXITED(status)) {
+            sigprocmask(SIG_BLOCK, &mask_all, &prev);
+            deletejob(jobs, pid);
+            sigprocmask(SIG_SETMASK, &prev, NULL);
+        } else if (WIFSIGNALED(status)) {
+            struct job_t* job =  getjobpid(jobs, pid);
+            sigprocmask(SIG_BLOCK, &mask_all, &prev);
+            printf("Job [%d] (%d) terminated by signal %d\n", job->jid, job->pid, WTERMSIG(status));
+            deletejob(jobs, pid);
+            sigprocmask(SIG_SETMASK, &prev, NULL);
+        } else {
+            struct job_t* job =  getjobpid(jobs, pid);
+            sigprocmask(SIG_BLOCK, &mask_all, &prev);
+            printf("Job [%d] (%d) stopped by signal %d\n", job->jid, job->pid, WSTOPSIG(status));
+            job->state = ST;
+            sigprocmask(SIG_SETMASK, &prev, NULL);
+        }
+    }
+    errno = olderrono;
     return;
 }
 
@@ -272,7 +390,13 @@ void sigchld_handler(int sig)
  *    to the foreground job.  
  */
 void sigint_handler(int sig) 
-{
+{   
+    int olderrno = errno;
+    pid_t pid = fgpid(jobs);
+    if (pid != 0) {
+        kill(-pid, sig); // 向 PID 对应的进程组发送sig信号
+    }
+    errno = olderrno;
     return;
 }
 
@@ -283,6 +407,12 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+    int olderrno = errno;
+    pid_t pid = fgpid(jobs);
+    if (pid != 0) {
+        kill(-pid, sig); // 向 PID 对应的进程组发送sig信号
+    }
+    errno = olderrno;
     return;
 }
 
