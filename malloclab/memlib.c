@@ -51,7 +51,7 @@ void mem_reset_brk()
 }
 
 /* 
- * mem_sbrk - simple model of the sbrk function. Extends the heap 
+ *    mem_sbrk - simple model of the sbrk function. Extends the heap 
  *    by incr bytes and returns the start address of the new area. In
  *    this model, the heap cannot be shrunk.
  */
