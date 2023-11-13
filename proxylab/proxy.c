@@ -5,22 +5,18 @@
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
 
+/* You won't lose style points for including this long line in your code */
+static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
+
 struct URI {
     char host[MAXLINE]; //hostname
     char port[MAXLINE]; //端口
     char path[MAXLINE]; //路径
 };
 
-/* You won't lose style points for including this long line in your code */
-static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
-
 void doit(int fd);
 void parse_uri(char *uri, struct URI *uri_);
-void build_header(char *http_header, struct URI *uri_data, rio_t *client_rio);
-
-// void get_filetype(char *filename, char *filetype);
-// void serve_dynamic(int fd, char *filename, char *cgiargs);
-// void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg);
+void build_header(char *http_header, struct URI *uri_, rio_t *client_rio);
 
 int main(int argc, char **argv) 
 {
@@ -35,9 +31,12 @@ int main(int argc, char **argv)
 	    exit(1);
     }
 
-    listenfd = Open_listenfd(argv[1]);
+    /* The server accepts requests from the client on the specified port */
+    listenfd = Open_listenfd(argv[1]); // argv[1] == port;
     while (1) {
 	    clientlen = sizeof(clientaddr);
+
+        /* Accept the first sockaddr client from the request queue for the listenfd. */
 	    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
         Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
                     port, MAXLINE, 0);
@@ -56,12 +55,11 @@ void doit(int connfd)
 {
     char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
     char server[MAXLINE];
-
-    rio_t rio, server_rio;
+    rio_t client_rio, server_rio;
 
     /* Read request line and headers */
-    Rio_readinitb(&rio, connfd);
-    if (!Rio_readlineb(&rio, buf, MAXLINE))  // size_t == 0 return;
+    Rio_readinitb(&client_rio, connfd);
+    if (!Rio_readlineb(&client_rio, buf, MAXLINE))  // size_t == 0 return;
         return;
     
     sscanf(buf, "%s %s %s", method, uri, version);       
@@ -70,15 +68,14 @@ void doit(int connfd)
         return;
     }      
 
-    // parse uri
+    /* Parse Uri */
     struct URI *uri_ = (struct URI *)malloc(sizeof(struct URI));
     parse_uri(uri, uri_);
 
-    //设置header
-    build_header(server, uri_, &rio);
+    /* Set the header */
+    build_header(server, uri_, &client_rio);
 
-    
-    // proxy try to connect server
+    /* Proxy try to connect server */
     int serverfd = Open_clientfd(uri_->host, uri_->port);
     if (serverfd < 0) {
         printf("Connection failed");
@@ -87,79 +84,83 @@ void doit(int connfd)
     Rio_readinitb(&server_rio, serverfd);
     Rio_writen(serverfd, server, strlen(server));
 
+    /* Response to client */
     size_t n;
-    // response to client
     while ((n = Rio_readlineb(&server_rio, buf, MAXLINE)) != 0)
     {
         printf("proxy forwarded %d bytes\n", (int)n);
         Rio_writen(connfd, buf, n);
     }
-    //关闭服务器描述符
+    
     Close(serverfd);
 }
 /* $end doit */
 
 void parse_uri(char *uri, struct URI *uri_) {
-    char *pos = strstr(uri, "//");
-    if (!pos) {
+    // ex: http://www.cmu.edu:8080/hub/index.html
+    char *sslash_pos = strstr(uri, "//"); // strstr返回//在uri中的首次出现位置
+    if (!sslash_pos) {
         char *path_pos = strstr(uri, "/");
         if (path_pos) {
             strcpy(uri_->path, path_pos);
         }
-        strcpy(uri_->port, "80");
+        strcpy(uri_->port, "80"); // default port
         return;
     }
     else {
-        char *port_pos = strstr(pos + 2, ":");
-        if (port_pos) {
+        char *colon_pos = strstr(sslash_pos + 2, ":");
+        if (colon_pos) {
             int tmp;
-            sscanf(port_pos + 1, "%d%s", &tmp, uri_->path);
+            sscanf(colon_pos + 1, "%d%s", &tmp, uri_->path);
             sprintf(uri_->port, "%d", tmp);
-            *port_pos = '\0';
+            *colon_pos = '\0';
         } else {
-            char *path_pos = strstr(pos + 2, "/");
+            char *path_pos = strstr(sslash_pos + 2, "/");
             if (path_pos) {
                 strcpy(uri_->path, path_pos);
                 strcpy(uri_->port, "80");
                 *path_pos = '\0';
             }
         }
-        strcpy(uri_->host, pos + 2);
+        strcpy(uri_->host, sslash_pos + 2);
     }
     return;
 }
 
-void build_header(char *http_header, struct URI *uri_data, rio_t *client_rio)
+void build_header(char *http_header, struct URI *uri_, rio_t *client_rio)
 {
     char *User_Agent = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
     char *conn_hdr = "Connection: close\r\n";
     char *prox_hdr = "Proxy-Connection: close\r\n";
-    char *host_hdr_format = "Host: %s\r\n";
-    char *requestlint_hdr_format = "GET %s HTTP/1.0\r\n";
-    char *endof_hdr = "\r\n";
+    char *host_format = "Host: %s\r\n";
+    char *request_header_format = "GET %s HTTP/1.0\r\n";
+    char *EOF_hdr = "\r\n";
 
-    char buf[MAXLINE], request_hdr[MAXLINE], other_hdr[MAXLINE], host_hdr[MAXLINE];
-    sprintf(request_hdr, requestlint_hdr_format, uri_data->path);
+    char buf[MAXLINE], request_hdr[MAXLINE], host_hdr[MAXLINE], other_hdr[MAXLINE];
+    sprintf(request_hdr, request_header_format, uri_->path);
+
+    // read one line
     while (Rio_readlineb(client_rio, buf, MAXLINE) > 0)
     {
-        if (strcmp(buf, endof_hdr) == 0)
-            break; /*EOF*/
+        if (strcmp(buf, EOF_hdr) == 0)
+            break; /* EOF */
 
-        if (!strncasecmp(buf, "Host", strlen("Host"))) /*Host:*/
+        /* Proxy should use the same Host header as the browser. */
+        if (strncasecmp(buf, "Host", strlen("Host")) == 0) // if 相等
         {
             strcpy(host_hdr, buf);
             continue;
         }
 
-        if (!strncasecmp(buf, "Connection", strlen("Connection")) && !strncasecmp(buf, "Proxy-Connection", strlen("Proxy-Connection")) && !strncasecmp(buf, "User-Agent", strlen("User-Agent")))
+        if (strncasecmp(buf, "Connection", strlen("Connection")) && strncasecmp(buf, "Proxy-Connection", strlen("Proxy-Connection")) && strncasecmp(buf, "User-Agent", strlen("User-Agent")))
         {
-            strcat(other_hdr, buf);
+            strcat(other_hdr, buf); // 把buf的内容复制到other_hdr末尾
         }
     }
-    if (strlen(host_hdr) == 0)
-    {
-        sprintf(host_hdr, host_hdr_format, uri_data->host);
-    }
+
+    /* Web browsers No attach own Host headers */
+    if (strlen(host_hdr) == 0) { sprintf(host_hdr, host_format, uri_->host); }
+
     sprintf(http_header, "%s%s%s%s%s%s%s",
             request_hdr,
             host_hdr,
@@ -167,7 +168,6 @@ void build_header(char *http_header, struct URI *uri_data, rio_t *client_rio)
             prox_hdr,
             User_Agent,
             other_hdr,
-            endof_hdr);
-
+            EOF_hdr);
     return;
 }
