@@ -1,9 +1,13 @@
 #include <stdio.h>
 #include "csapp.h"
+#include "sbuf.h"
 
 /* Recommended max cache and object sizes */
 #define MAX_CACHE_SIZE 1049000
 #define MAX_OBJECT_SIZE 102400
+#define SBUFSIZE 16
+#define NTHREADS 4
+sbuf_t sbuf; //连接缓冲区
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
@@ -17,6 +21,7 @@ struct URI {
 void doit(int fd);
 void parse_uri(char *uri, struct URI *uri_);
 void build_header(char *http_header, struct URI *uri_, rio_t *client_rio);
+void *thread(void *vargp);
 
 int main(int argc, char **argv) 
 {
@@ -24,6 +29,7 @@ int main(int argc, char **argv)
     char hostname[MAXLINE], port[MAXLINE];
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
+    pthread_t tid;
 
     /* Check command line args */
     if (argc != 2) {
@@ -33,18 +39,35 @@ int main(int argc, char **argv)
 
     /* The server accepts requests from the client on the specified port */
     listenfd = Open_listenfd(argv[1]); // argv[1] == port;
+    sbuf_init(&sbuf, SBUFSIZE);
+
+    /* Create worker threads */
+    for (int i = 0; i < NTHREADS; i++) {
+        Pthread_create(&tid, NULL, thread, NULL);
+    }
+    
     while (1) {
 	    clientlen = sizeof(clientaddr);
 
         /* Accept the first sockaddr client from the request queue for the listenfd. */
 	    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+        sbuf_insert(&sbuf, connfd);
         Getnameinfo((SA *) &clientaddr, clientlen, hostname, MAXLINE, 
                     port, MAXLINE, 0);
-        printf("Accepted connection from (%s, %s)\n", hostname, port);
-	    doit(connfd);                                         
-	    Close(connfd);                                          
+        printf("Accepted connection from (%s, %s)\n", hostname, port);                                         
     }
+
     return 0;
+}
+
+void *thread(void *vargp) {
+    Pthread_detach(Pthread_self()); // 分离一个线程，允许其资源在终止时自动回收
+    
+    while (1) {
+        int connfd = sbuf_remove(&sbuf); /* Remove connfd from buffer */
+        doit(connfd);
+        Close(connfd);
+    }
 }
 
 /*
