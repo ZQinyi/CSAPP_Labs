@@ -1,21 +1,21 @@
 #include <stdio.h>
 #include "csapp.h"
 #include "sbuf.h"
+#include "cache.h"
 
 /* Recommended max cache and object sizes */
-#define MAX_CACHE_SIZE 1049000
-#define MAX_OBJECT_SIZE 102400
 #define SBUFSIZE 16
 #define NTHREADS 4
-sbuf_t sbuf; //连接缓冲区
+sbuf_t sbuf;        // buffer pool
+Cache cache;
 
 /* You won't lose style points for including this long line in your code */
 static const char *user_agent_hdr = "User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:10.0.3) Gecko/20120305 Firefox/10.0.3\r\n";
 
 struct URI {
-    char host[MAXLINE]; //hostname
-    char port[MAXLINE]; //端口
-    char path[MAXLINE]; //路径
+    char host[MAXLINE];
+    char port[MAXLINE];
+    char path[MAXLINE]; 
 };
 
 void doit(int fd);
@@ -29,6 +29,7 @@ int main(int argc, char **argv)
     char hostname[MAXLINE], port[MAXLINE];
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
+    cache_init(&cache);
     pthread_t tid;
 
     /* Check command line args */
@@ -48,7 +49,6 @@ int main(int argc, char **argv)
     
     while (1) {
 	    clientlen = sizeof(clientaddr);
-
         /* Accept the first sockaddr client from the request queue for the listenfd. */
 	    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
         sbuf_insert(&sbuf, connfd);
@@ -85,16 +85,30 @@ void doit(int connfd)
     if (!Rio_readlineb(&client_rio, buf, MAXLINE))  // size_t == 0 return;
         return;
     
-    sscanf(buf, "%s %s %s", method, uri, version);       
+    sscanf(buf, "%s %s %s", method, uri, version);   
     if (strcasecmp(method, "GET")) {               
         printf("Proxy does not implement this method");
         return;
-    }      
+    }    
 
+/* Situation1: The requested content is inside the cache */
+    char cache_tag[MAXLINE];
+    strcpy(cache_tag, uri);
+    int index;
+    if ((index = in_cache(&cache, cache_tag)) != -1) {
+        Rio_writen(connfd, cache.data[index].obj, strlen(cache.data[index].obj));
+        P(&cache.data[index].read);
+        cache.data[index].read_cnt--;
+        if (cache.data[index].read_cnt == 0)
+            V(&cache.data[index].write);
+        V(&cache.data[index].read);
+        return;
+    }
+
+/* Situation2: Not inside the cache */
     /* Parse Uri */
     struct URI *uri_ = (struct URI *)malloc(sizeof(struct URI));
     parse_uri(uri, uri_);
-
     /* Set the header */
     build_header(server, uri_, &client_rio);
 
@@ -107,15 +121,22 @@ void doit(int connfd)
     Rio_readinitb(&server_rio, serverfd);
     Rio_writen(serverfd, server, strlen(server));
 
+    char cache_buf[MAX_OBJECT_SIZE];
+    int cache_buf_size = 0;
     /* Response to client */
     size_t n;
     while ((n = Rio_readlineb(&server_rio, buf, MAXLINE)) != 0)
     {
+        cache_buf_size += n;
+        if (cache_buf_size < MAX_OBJECT_SIZE) strcat(cache_buf, buf);
         printf("proxy forwarded %d bytes\n", (int)n);
         Rio_writen(connfd, buf, n);
     }
-    
     Close(serverfd);
+
+    if (cache_buf_size < MAX_OBJECT_SIZE) {
+        write_cache(&cache, cache_tag, cache_buf);
+    }
 }
 /* $end doit */
 
@@ -165,8 +186,7 @@ void build_header(char *http_header, struct URI *uri_, rio_t *client_rio)
     // read one line
     while (Rio_readlineb(client_rio, buf, MAXLINE) > 0)
     {
-        if (strcmp(buf, EOF_hdr) == 0)
-            break; /* EOF */
+        if (strcmp(buf, EOF_hdr) == 0) break; /* EOF */
 
         /* Proxy should use the same Host header as the browser. */
         if (strncasecmp(buf, "Host", strlen("Host")) == 0) // if 相等
@@ -176,14 +196,11 @@ void build_header(char *http_header, struct URI *uri_, rio_t *client_rio)
         }
 
         if (strncasecmp(buf, "Connection", strlen("Connection")) && strncasecmp(buf, "Proxy-Connection", strlen("Proxy-Connection")) && strncasecmp(buf, "User-Agent", strlen("User-Agent")))
-        {
             strcat(other_hdr, buf); // 把buf的内容复制到other_hdr末尾
-        }
     }
 
     /* Web browsers No attach own Host headers */
     if (strlen(host_hdr) == 0) { sprintf(host_hdr, host_format, uri_->host); }
-
     sprintf(http_header, "%s%s%s%s%s%s%s",
             request_hdr,
             host_hdr,
