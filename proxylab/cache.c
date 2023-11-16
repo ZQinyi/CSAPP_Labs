@@ -12,17 +12,15 @@ void cache_init(Cache *cache) {
     } 
 }
 
+/* Read operation */
 int in_cache(Cache *cache, char *url) {
     int i;
     for (i = 0; i < MAX_CACHE; i++) {
-        // gain read lock
-        P(&cache->data[i].read);
+        P(&cache->data[i].read);          // gain read lock
         cache->data[i].read_cnt++;
         if (cache->data[i].read_cnt == 1)
-            // gain write lock
-            P(&cache->data[i].write);
-        // release read lock
-        V(&cache->data[i].read);
+            P(&cache->data[i].write);     // gain write lock
+        V(&cache->data[i].read);          // release read lock
 
         // find the target
         if ((cache->data[i].isEmpty == 0) && (strcmp(url, cache->data[i].uri) == 0))
@@ -39,6 +37,7 @@ int in_cache(Cache *cache, char *url) {
     return i;
 }
 
+/* Write operation */
 void write_cache(Cache *cache, char *uri, char *buf) {
     int index;
     if ((index = get_index(cache)) == -1) {
@@ -54,17 +53,18 @@ void write_cache(Cache *cache, char *uri, char *buf) {
     update_LRU(cache, index);
 }
 
+/* Write operation */
 int get_index(Cache *cache) {
     int max_LRU = 0;
     int index = -1;
 
     for (int i = 0; i < MAX_CACHE; i++) {
-        P(&cache->data[i].write); // 获取写锁
+        P(&cache->data[i].write);
 
     /* Situation1: cache has empty position */
         if (cache->data[i].isEmpty == 1) {
             index = i;
-            V(&cache->data[i].write); // 释放写锁
+            V(&cache->data[i].write);
             break;
         }
 
@@ -73,13 +73,13 @@ int get_index(Cache *cache) {
             max_LRU = cache->data[i].LRU;
             index = i;
         }
-        V(&cache->data[i].write); // 释放写锁
+        V(&cache->data[i].write);
     }
 
     return index;
 }
 
-
+/* Write operation */
 void update_LRU(Cache *cache, int index) {
     for (int i = 0; i < MAX_CACHE; i++)
     {
